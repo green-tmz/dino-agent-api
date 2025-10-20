@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	_ "strings"
 )
 
 type CheckRequest struct {
-	SteamID string `json:"steamid"`
+	SteamID   string `json:"steamid"`
+	OldSlotID string `json:"old_slot_id,omitempty"`
 }
 
 type CheckResponse struct {
@@ -26,8 +28,19 @@ type FileContentResponse struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+type TransferResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	PlayerFile string `json:"player_file"`
+	SlotFile   string `json:"slot_file"`
+	Error      string `json:"error,omitempty"`
+}
+
+const (
+	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
+)
+
 func checkPlayerFile(steamid string) CheckResponse {
-	playersDir := `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	playerFile := filepath.Join(playersDir, steamid+".json")
 
 	if _, err := os.Stat(playerFile); os.IsNotExist(err) {
@@ -50,7 +63,6 @@ func checkPlayerFile(steamid string) CheckResponse {
 }
 
 func getPlayerFileContent(steamid string) FileContentResponse {
-	playersDir := `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	playerFile := filepath.Join(playersDir, steamid+".json")
 
 	// Проверяем существование файла
@@ -97,6 +109,94 @@ func getPlayerFileContent(steamid string) FileContentResponse {
 	return FileContentResponse{
 		Success: true,
 		Content: jsonData,
+	}
+}
+
+func transferPlayerSlot(steamid, oldSlotID string) TransferResponse {
+	playerFile := filepath.Join(playersDir, steamid+".json")
+	remoteDir := filepath.Join(`C:\EVRIMA\surv_server\TheIsle\Saved\Slots`, steamid)
+	oldSlotFile := filepath.Join(remoteDir, oldSlotID+".json")
+
+	// Проверяем существование исходного файла
+	if _, err := os.Stat(playerFile); os.IsNotExist(err) {
+		return TransferResponse{
+			Success: false,
+			Error:   "Player file not found",
+		}
+	} else if err != nil {
+		return TransferResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error checking player file: %v", err),
+		}
+	}
+
+	// Читаем содержимое файла игрока
+	content, err := os.ReadFile(playerFile)
+	if err != nil {
+		return TransferResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to read player file: %v", err),
+		}
+	}
+
+	// Проверяем, не является ли файл пустым или невалидным
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(content, &decoded); err != nil || len(decoded) == 0 {
+		// Создаем новый валидный JSON
+		newData := map[string]interface{}{
+			"slot_id":  oldSlotID,
+			"datafile": nil,
+		}
+		content, err = json.MarshalIndent(newData, "", "  ")
+		if err != nil {
+			return TransferResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to create new JSON: %v", err),
+			}
+		}
+		log.Printf("Created new JSON structure for invalid file")
+	} else if _, exists := decoded["slot_id"]; !exists {
+		// Добавляем slot_id если его нет
+		decoded["slot_id"] = oldSlotID
+		content, err = json.MarshalIndent(decoded, "", "  ")
+		if err != nil {
+			return TransferResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to add slot_id to JSON: %v", err),
+			}
+		}
+		log.Printf("Added slot_id to existing JSON")
+	}
+
+	// Создаем директорию для слотов если не существует
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		return TransferResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create directory: %v", err),
+		}
+	}
+
+	// Сохраняем в слот
+	if err := os.WriteFile(oldSlotFile, content, 0644); err != nil {
+		return TransferResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to write slot file: %v", err),
+		}
+	}
+
+	// Очищаем старый файл игрока после сохранения
+	if err := os.Remove(playerFile); err != nil {
+		// Логируем ошибку, но не прерываем выполнение
+		log.Printf("Warning: Failed to delete player file: %v", err)
+	}
+
+	log.Printf("Old slot %s transferred from %s to %s", oldSlotID, playerFile, oldSlotFile)
+
+	return TransferResponse{
+		Success:    true,
+		Message:    fmt.Sprintf("Slot %s successfully transferred", oldSlotID),
+		PlayerFile: playerFile,
+		SlotFile:   oldSlotFile,
 	}
 }
 
@@ -180,9 +280,52 @@ func fileContentHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func transferHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		oldSlotID := r.URL.Query().Get("old_slot_id")
+		if steamid == "" || oldSlotID == "" {
+			http.Error(w, `{"error": "steamid and old_slot_id parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+		req.OldSlotID = oldSlotID
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" || req.OldSlotID == "" {
+		http.Error(w, `{"error": "steamid and old_slot_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	response := transferPlayerSlot(req.SteamID, req.OldSlotID)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/file", fileContentHandler)
+	http.HandleFunc("/transfer", transferHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status": "ok"}`))
 	})
