@@ -130,6 +130,56 @@ func getPlayerFileContent(steamid string) FileContentResponse {
 	}
 }
 
+func getSlotFileContent(steamid, slotID string) FileContentResponse {
+	slotFile := filepath.Join(slotsDir, steamid, slotID+".json")
+
+	// Проверяем существование файла
+	if _, err := os.Stat(slotFile); os.IsNotExist(err) {
+		return FileContentResponse{
+			Success: false,
+			Error:   "Slot file not found",
+		}
+	} else if err != nil {
+		return FileContentResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+
+	// Читаем файл
+	file, err := os.Open(slotFile)
+	if err != nil {
+		return FileContentResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to open slot file: %v", err),
+		}
+	}
+	defer file.Close()
+
+	// Читаем содержимое
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return FileContentResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to read slot file: %v", err),
+		}
+	}
+
+	// Валидируем JSON (опционально, но рекомендуется)
+	var jsonData json.RawMessage
+	if err := json.Unmarshal(content, &jsonData); err != nil {
+		return FileContentResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid JSON in slot file: %v", err),
+		}
+	}
+
+	return FileContentResponse{
+		Success: true,
+		Content: jsonData,
+	}
+}
+
 func transferPlayerSlot(steamid, oldSlotID string) TransferResponse {
 	playerFile := filepath.Join(playersDir, steamid+".json")
 	remoteDir := filepath.Join(`C:\EVRIMA\surv_server\TheIsle\Saved\Slots`, steamid)
@@ -409,7 +459,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func fileContentHandler(w http.ResponseWriter, r *http.Request) {
+func playerFileContentHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -446,6 +496,48 @@ func fileContentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := getPlayerFileContent(req.SteamID)
+	json.NewEncoder(w).Encode(response)
+}
+
+func slotFileContentHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		slotID := r.URL.Query().Get("slot_id")
+		if steamid == "" || slotID == "" {
+			http.Error(w, `{"error": "steamid and slot_id parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+		req.SlotID = slotID
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" || req.SlotID == "" {
+		http.Error(w, `{"error": "steamid and slot_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	response := getSlotFileContent(req.SteamID, req.SlotID)
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -577,7 +669,8 @@ func restoreSlotHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/check", checkHandler)
-	http.HandleFunc("/file", fileContentHandler)
+	http.HandleFunc("/player-file", playerFileContentHandler)
+	http.HandleFunc("/slot-file", slotFileContentHandler)
 	http.HandleFunc("/transfer", transferHandler)
 	http.HandleFunc("/empty-slot", emptySlotHandler)
 	http.HandleFunc("/restore-slot", restoreSlotHandler)
