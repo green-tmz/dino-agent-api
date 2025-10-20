@@ -20,7 +20,7 @@ type CheckResponse struct {
 }
 
 func checkPlayerFile(steamid string) CheckResponse {
-	playersDir := "/surv_server/TheIsle/Saved/Databases/Survival/Players"
+	playersDir := `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	playerFile := filepath.Join(playersDir, steamid+".json")
 
 	if _, err := os.Stat(playerFile); os.IsNotExist(err) {
