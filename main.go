@@ -36,6 +36,13 @@ type TransferResponse struct {
 	Error      string `json:"error,omitempty"`
 }
 
+type EmptySlotResponse struct {
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+	SlotFile string `json:"slot_file"`
+	Error    string `json:"error,omitempty"`
+}
+
 const (
 	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 )
@@ -200,6 +207,51 @@ func transferPlayerSlot(steamid, oldSlotID string) TransferResponse {
 	}
 }
 
+// createEmptySlot создает пустой слот при смерти динозавра
+func createEmptySlot(steamid, oldSlotID string) EmptySlotResponse {
+	remoteDir := filepath.Join(`C:\EVRIMA\surv_server\TheIsle\Saved\Slots`, steamid)
+	oldSlotFile := filepath.Join(remoteDir, oldSlotID+".json")
+
+	// Создаем структуру для пустого слота
+	emptySlot := map[string]interface{}{
+		"slot_id":  oldSlotID,
+		"datafile": nil,
+	}
+
+	// Форматируем JSON с отступами
+	emptySlotJSON, err := json.MarshalIndent(emptySlot, "", "  ")
+	if err != nil {
+		return EmptySlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to marshal JSON: %v", err),
+		}
+	}
+
+	// Создаем директорию для слотов если не существует
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		return EmptySlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create directory: %v", err),
+		}
+	}
+
+	// Сохраняем пустой слот
+	if err := os.WriteFile(oldSlotFile, emptySlotJSON, 0644); err != nil {
+		return EmptySlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to write empty slot file: %v", err),
+		}
+	}
+
+	log.Printf("Empty slot created for steamid %s, slot %s at %s", steamid, oldSlotID, oldSlotFile)
+
+	return EmptySlotResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("Empty slot %s created successfully", oldSlotID),
+		SlotFile: oldSlotFile,
+	}
+}
+
 func checkHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -322,10 +374,53 @@ func transferHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func emptySlotHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		oldSlotID := r.URL.Query().Get("old_slot_id")
+		if steamid == "" || oldSlotID == "" {
+			http.Error(w, `{"error": "steamid and old_slot_id parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+		req.OldSlotID = oldSlotID
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" || req.OldSlotID == "" {
+		http.Error(w, `{"error": "steamid and old_slot_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	response := createEmptySlot(req.SteamID, req.OldSlotID)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/file", fileContentHandler)
 	http.HandleFunc("/transfer", transferHandler)
+	http.HandleFunc("/empty-slot", emptySlotHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status": "ok"}`))
 	})
