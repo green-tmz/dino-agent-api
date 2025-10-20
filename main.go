@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	_ "strings"
+	"time"
 )
 
 type CheckRequest struct {
 	SteamID   string `json:"steamid"`
 	OldSlotID string `json:"old_slot_id,omitempty"`
+	SlotID    string `json:"slot_id,omitempty"`
 }
 
 type CheckResponse struct {
@@ -43,8 +45,17 @@ type EmptySlotResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type RestoreSlotResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	PlayerFile string `json:"player_file"`
+	SlotFile   string `json:"slot_file"`
+	Error      string `json:"error,omitempty"`
+}
+
 const (
 	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
+	slotsDir   = `C:\EVRIMA\surv_server\TheIsle\Saved\Slots`
 )
 
 func checkPlayerFile(steamid string) CheckResponse {
@@ -252,6 +263,112 @@ func createEmptySlot(steamid, oldSlotID string) EmptySlotResponse {
 	}
 }
 
+// restoreSlotFromFile восстанавливает слот из файла слотов в файл игрока
+func restoreSlotFromFile(steamid, slotID string) RestoreSlotResponse {
+	remoteDir := filepath.Join(slotsDir, steamid)
+	playersDirPath := playersDir
+	slotFile := filepath.Join(remoteDir, slotID+".json")
+	playerFile := filepath.Join(playersDirPath, steamid+".json")
+
+	// Создаем директории если не существуют
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create remote directory: %v", err),
+		}
+	}
+
+	if err := os.MkdirAll(playersDirPath, 0755); err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create players directory: %v", err),
+		}
+	}
+
+	// Проверяем существование файла слота
+	if _, err := os.Stat(slotFile); os.IsNotExist(err) {
+		// Если файла нет → создаём пустой слот
+		emptySlot := map[string]interface{}{
+			"slot_id":  slotID,
+			"datafile": nil,
+			"created":  time.Now().Format("2006-01-02 15:04:05"),
+		}
+
+		jsonData, err := json.MarshalIndent(emptySlot, "", "  ")
+		if err != nil {
+			return RestoreSlotResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to marshal empty slot JSON: %v", err),
+			}
+		}
+
+		// Сохраняем пустой слот
+		if err := os.WriteFile(slotFile, jsonData, 0644); err != nil {
+			return RestoreSlotResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to create empty slot file: %v", err),
+			}
+		}
+
+		log.Printf("Created empty slot: %s", slotFile)
+
+		// Используем созданный пустой слот для восстановления
+		jsonData = jsonData
+	} else if err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error checking slot file: %v", err),
+		}
+	}
+
+	// Читаем данные из файла слота (всегда берем данные только из файла слота)
+	slotContent, err := os.ReadFile(slotFile)
+	if err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to read slot file: %v", err),
+		}
+	}
+
+	// Валидируем JSON из слота
+	var slotData map[string]interface{}
+	if err := json.Unmarshal(slotContent, &slotData); err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid JSON in slot file: %v", err),
+		}
+	}
+
+	// Обновляем slot_id на актуальный (на случай если в файле старый)
+	slotData["slot_id"] = slotID
+
+	// Форматируем JSON для записи
+	jsonData, err := json.MarshalIndent(slotData, "", "  ")
+	if err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to marshal JSON for player file: %v", err),
+		}
+	}
+
+	// Записываем данные в файл игрока
+	if err := os.WriteFile(playerFile, jsonData, 0644); err != nil {
+		return RestoreSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to write player file: %v", err),
+		}
+	}
+
+	log.Printf("Slot restored from %s to %s", slotFile, playerFile)
+
+	return RestoreSlotResponse{
+		Success:    true,
+		Message:    fmt.Sprintf("Slot %s successfully restored to player file", slotID),
+		PlayerFile: playerFile,
+		SlotFile:   slotFile,
+	}
+}
+
 func checkHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -416,11 +533,54 @@ func emptySlotHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func restoreSlotHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		slotID := r.URL.Query().Get("slot_id")
+		if steamid == "" || slotID == "" {
+			http.Error(w, `{"error": "steamid and slot_id parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+		req.SlotID = slotID
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" || req.SlotID == "" {
+		http.Error(w, `{"error": "steamid and slot_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	response := restoreSlotFromFile(req.SteamID, req.SlotID)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/file", fileContentHandler)
 	http.HandleFunc("/transfer", transferHandler)
 	http.HandleFunc("/empty-slot", emptySlotHandler)
+	http.HandleFunc("/restore-slot", restoreSlotHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status": "ok"}`))
 	})
