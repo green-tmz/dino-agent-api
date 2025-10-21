@@ -82,6 +82,92 @@ const (
 	slotsDir   = `C:\EVRIMA\surv_server\TheIsle\Saved\Slots`
 )
 
+// getFileContentByPath возвращает содержимое файла по указанному пути
+func getFileContentByPath(filePath string) FileContentByPathResponse {
+	log.Printf("Getting file content by path: %s", filePath)
+
+	// Проверяем, что путь не пустой
+	if filePath == "" {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   "File path is required",
+		}
+		log.Printf("File path is empty")
+		return result
+	}
+
+	// Проверяем существование файла
+	fileInfo, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   "File not found",
+		}
+		log.Printf("File not found: %s", filePath)
+		return result
+	} else if err != nil {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error checking file: %v", err),
+		}
+		log.Printf("Error checking file: %v", err)
+		return result
+	}
+
+	// Проверяем, что это файл, а не директория
+	if fileInfo.IsDir() {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   "Path points to a directory, not a file",
+		}
+		log.Printf("Path is a directory: %s", filePath)
+		return result
+	}
+
+	// Проверяем размер файла (ограничим очень большие файлы)
+	if fileInfo.Size() > 10*1024*1024 { // 10MB limit
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   "File too large (max 10MB)",
+		}
+		log.Printf("File too large: %d bytes", fileInfo.Size())
+		return result
+	}
+
+	// Читаем файл
+	file, err := os.Open(filePath)
+	if err != nil {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to open file: %v", err),
+		}
+		log.Printf("Failed to open file: %v", err)
+		return result
+	}
+	defer file.Close()
+
+	// Читаем содержимое
+	content, err := io.ReadAll(file)
+	if err != nil {
+		result := FileContentByPathResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to read file: %v", err),
+		}
+		log.Printf("Failed to read file: %v", err)
+		return result
+	}
+
+	log.Printf("Successfully read file content, size: %d bytes", len(content))
+
+	result := FileContentByPathResponse{
+		Success: true,
+		Content: string(content),
+		Size:    int64(len(content)),
+	}
+	log.Printf("File content retrieved successfully")
+	return result
+}
+
 func checkPlayerFile(steamid string) CheckResponse {
 	log.Printf("Checking player file for SteamID: %s", steamid)
 	playerFile := filepath.Join(playersDir, steamid+".json")
@@ -523,6 +609,141 @@ func restoreSlotFromFile(steamid, slotID string) RestoreSlotResponse {
 	return result
 }
 
+// writeSlotFile записывает данные в файл слота
+func writeSlotFile(steamid, fileName string, data json.RawMessage) WriteSlotResponse {
+	log.Printf("Writing slot file for SteamID: %s, FileName: %s", steamid, fileName)
+
+	// Проверяем, что fileName имеет расширение .json
+	if filepath.Ext(fileName) != ".json" {
+		fileName = fileName + ".json"
+	}
+
+	remoteDir := filepath.Join(slotsDir, steamid)
+	filePath := filepath.Join(remoteDir, fileName)
+
+	// Создаем директорию если не существует
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		result := WriteSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create directory: %v", err),
+		}
+		log.Printf("Failed to create directory: %v", err)
+		return result
+	}
+
+	// Если данные не предоставлены, создаем структуру по умолчанию
+	if len(data) == 0 || string(data) == "null" {
+		defaultData := map[string]interface{}{
+			"slot_id":  strings.TrimSuffix(fileName, ".json"),
+			"datafile": nil,
+			"created":  time.Now().Format("2006-01-02 15:04:05"),
+		}
+
+		jsonData, err := json.MarshalIndent(defaultData, "", "  ")
+		if err != nil {
+			result := WriteSlotResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to marshal default JSON: %v", err),
+			}
+			log.Printf("Failed to marshal default JSON: %v", err)
+			return result
+		}
+		data = jsonData
+		log.Printf("Using default data structure for slot file")
+	} else {
+		// Валидируем предоставленные JSON данные
+		var jsonData interface{}
+		if err := json.Unmarshal(data, &jsonData); err != nil {
+			result := WriteSlotResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Invalid JSON data: %v", err),
+			}
+			log.Printf("Invalid JSON data: %v", err)
+			return result
+		}
+
+		// Переформатируем JSON с отступами
+		formattedData, err := json.MarshalIndent(jsonData, "", "  ")
+		if err != nil {
+			result := WriteSlotResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to format JSON: %v", err),
+			}
+			log.Printf("Failed to format JSON: %v", err)
+			return result
+		}
+		data = formattedData
+		log.Printf("Using provided data for slot file, length: %d bytes", len(data))
+	}
+
+	// Записываем файл
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		result := WriteSlotResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to write file: %v", err),
+		}
+		log.Printf("Failed to write file: %v", err)
+		return result
+	}
+
+	log.Printf("Data written to slot file for steamid %s, file %s at %s", steamid, fileName, filePath)
+
+	result := WriteSlotResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("Data successfully written to %s", fileName),
+		FilePath: filePath,
+	}
+	log.Printf("Write slot file completed successfully")
+	return result
+}
+
+// Обработчик для получения содержимого файла по пути
+func fileContentByPathHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req FilePathRequest
+
+	switch r.Method {
+	case "GET":
+		filePath := r.URL.Query().Get("file_path")
+		if filePath == "" {
+			log.Printf("File content by path handler: missing file_path parameter in GET request")
+			http.Error(w, `{"error": "file_path parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+		req.FilePath = filePath
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("File content by path handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		log.Printf("File content by path handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.FilePath == "" {
+		log.Printf("File content by path handler: file_path is required")
+		http.Error(w, `{"error": "file_path is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("File content by path handler processing request for path: %s", req.FilePath)
+	response := getFileContentByPath(req.FilePath)
+	log.Printf("File content by path handler response: Success=%t, Error=%s, Size=%d", response.Success, response.Error, response.Size)
+	json.NewEncoder(w).Encode(response)
+}
+
 func checkHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -807,94 +1028,6 @@ func restoreSlotHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// writeSlotFile записывает данные в файл слота
-func writeSlotFile(steamid, fileName string, data json.RawMessage) WriteSlotResponse {
-	log.Printf("Writing slot file for SteamID: %s, FileName: %s", steamid, fileName)
-
-	// Проверяем, что fileName имеет расширение .json
-	if filepath.Ext(fileName) != ".json" {
-		fileName = fileName + ".json"
-	}
-
-	remoteDir := filepath.Join(slotsDir, steamid)
-	filePath := filepath.Join(remoteDir, fileName)
-
-	// Создаем директорию если не существует
-	if err := os.MkdirAll(remoteDir, 0755); err != nil {
-		result := WriteSlotResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to create directory: %v", err),
-		}
-		log.Printf("Failed to create directory: %v", err)
-		return result
-	}
-
-	// Если данные не предоставлены, создаем структуру по умолчанию
-	if len(data) == 0 || string(data) == "null" {
-		defaultData := map[string]interface{}{
-			"slot_id":  strings.TrimSuffix(fileName, ".json"),
-			"datafile": nil,
-			"created":  time.Now().Format("2006-01-02 15:04:05"),
-		}
-
-		jsonData, err := json.MarshalIndent(defaultData, "", "  ")
-		if err != nil {
-			result := WriteSlotResponse{
-				Success: false,
-				Error:   fmt.Sprintf("Failed to marshal default JSON: %v", err),
-			}
-			log.Printf("Failed to marshal default JSON: %v", err)
-			return result
-		}
-		data = jsonData
-		log.Printf("Using default data structure for slot file")
-	} else {
-		// Валидируем предоставленные JSON данные
-		var jsonData interface{}
-		if err := json.Unmarshal(data, &jsonData); err != nil {
-			result := WriteSlotResponse{
-				Success: false,
-				Error:   fmt.Sprintf("Invalid JSON data: %v", err),
-			}
-			log.Printf("Invalid JSON data: %v", err)
-			return result
-		}
-
-		// Переформатируем JSON с отступами
-		formattedData, err := json.MarshalIndent(jsonData, "", "  ")
-		if err != nil {
-			result := WriteSlotResponse{
-				Success: false,
-				Error:   fmt.Sprintf("Failed to format JSON: %v", err),
-			}
-			log.Printf("Failed to format JSON: %v", err)
-			return result
-		}
-		data = formattedData
-		log.Printf("Using provided data for slot file, length: %d bytes", len(data))
-	}
-
-	// Записываем файл
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
-		result := WriteSlotResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to write file: %v", err),
-		}
-		log.Printf("Failed to write file: %v", err)
-		return result
-	}
-
-	log.Printf("Data written to slot file for steamid %s, file %s at %s", steamid, fileName, filePath)
-
-	result := WriteSlotResponse{
-		Success:  true,
-		Message:  fmt.Sprintf("Data successfully written to %s", fileName),
-		FilePath: filePath,
-	}
-	log.Printf("Write slot file completed successfully")
-	return result
-}
-
 func writeSlotHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -949,91 +1082,6 @@ func writeSlotHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func getFileContentByPath(filePath string) FileContentByPathResponse {
-	log.Printf("Getting file content by path: %s", filePath)
-
-	// Проверяем, что путь не пустой
-	if filePath == "" {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   "File path is required",
-		}
-		log.Printf("File path is empty")
-		return result
-	}
-
-	// Проверяем существование файла
-	fileInfo, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   "File not found",
-		}
-		log.Printf("File not found: %s", filePath)
-		return result
-	} else if err != nil {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Error checking file: %v", err),
-		}
-		log.Printf("Error checking file: %v", err)
-		return result
-	}
-
-	// Проверяем, что это файл, а не директория
-	if fileInfo.IsDir() {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   "Path points to a directory, not a file",
-		}
-		log.Printf("Path is a directory: %s", filePath)
-		return result
-	}
-
-	// Проверяем размер файла (ограничим очень большие файлы)
-	if fileInfo.Size() > 10*1024*1024 { // 10MB limit
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   "File too large (max 10MB)",
-		}
-		log.Printf("File too large: %d bytes", fileInfo.Size())
-		return result
-	}
-
-	// Читаем файл
-	file, err := os.Open(filePath)
-	if err != nil {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to open file: %v", err),
-		}
-		log.Printf("Failed to open file: %v", err)
-		return result
-	}
-	defer file.Close()
-
-	// Читаем содержимое
-	content, err := io.ReadAll(file)
-	if err != nil {
-		result := FileContentByPathResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to read file: %v", err),
-		}
-		log.Printf("Failed to read file: %v", err)
-		return result
-	}
-
-	log.Printf("Successfully read file content, size: %d bytes", len(content))
-
-	result := FileContentByPathResponse{
-		Success: true,
-		Content: string(content),
-		Size:    int64(len(content)),
-	}
-	log.Printf("File content retrieved successfully")
-	return result
-}
-
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/player-file", playerFileContentHandler)
@@ -1042,6 +1090,7 @@ func main() {
 	http.HandleFunc("/empty-slot", emptySlotHandler)
 	http.HandleFunc("/restore-slot", restoreSlotHandler)
 	http.HandleFunc("/write-slot", writeSlotHandler)
+	http.HandleFunc("/file-content", fileContentByPathHandler) // Новый обработчик
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Health check requested from %s", r.RemoteAddr)
 		w.Write([]byte(`{"status": "ok"}`))
