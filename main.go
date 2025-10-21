@@ -90,6 +90,21 @@ type WriteFileResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type FileInfoResponse struct {
+	Success              bool      `json:"success"`
+	FilePath             string    `json:"file_path,omitempty"`
+	Exists               bool      `json:"exists"`
+	IsDirectory          bool      `json:"is_directory,omitempty"`
+	Size                 int64     `json:"size,omitempty"`
+	ModTime              time.Time `json:"mod_time,omitempty"`
+	ModTimeUnix          int64     `json:"mod_time_unix,omitempty"`
+	ModTimeFormatted     string    `json:"mod_time_formatted,omitempty"`
+	CreatedTime          time.Time `json:"created_time,omitempty"`
+	CreatedTimeUnix      int64     `json:"created_time_unix,omitempty"`
+	CreatedTimeFormatted string    `json:"created_time_formatted,omitempty"`
+	Error                string    `json:"error,omitempty"`
+}
+
 const (
 	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	slotsDir   = `C:\EVRIMA\surv_server\TheIsle\Saved\Slots`
@@ -1233,6 +1248,131 @@ func writeSlotHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func getFileInfo(filePath string) FileInfoResponse {
+	log.Printf("Getting file info for: %s", filePath)
+
+	// Проверяем, что путь не пустой
+	if filePath == "" {
+		result := FileInfoResponse{
+			Success: false,
+			Error:   "File path is required",
+		}
+		log.Printf("File path is empty")
+		return result
+	}
+
+	// Получаем информацию о файле
+	fileInfo, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		result := FileInfoResponse{
+			Success:  true,
+			FilePath: filePath,
+			Exists:   false,
+		}
+		log.Printf("File not found: %s", filePath)
+		return result
+	} else if err != nil {
+		result := FileInfoResponse{
+			Success:  false,
+			FilePath: filePath,
+			Error:    fmt.Sprintf("Error getting file info: %v", err),
+		}
+		log.Printf("Error getting file info for %s: %v", filePath, err)
+		return result
+	}
+
+	// Получаем время создания файла (для Windows)
+	createdTime := getFileCreationTime(filePath)
+
+	// Форматируем время для удобства чтения
+	modTimeFormatted := fileInfo.ModTime().Format("2006-01-02 15:04:05")
+	createdTimeFormatted := ""
+	if !createdTime.IsZero() {
+		createdTimeFormatted = createdTime.Format("2006-01-02 15:04:05")
+	}
+
+	result := FileInfoResponse{
+		Success:              true,
+		FilePath:             filePath,
+		Exists:               true,
+		IsDirectory:          fileInfo.IsDir(),
+		Size:                 fileInfo.Size(),
+		ModTime:              fileInfo.ModTime(),
+		ModTimeUnix:          fileInfo.ModTime().Unix(),
+		ModTimeFormatted:     modTimeFormatted,
+		CreatedTime:          createdTime,
+		CreatedTimeUnix:      createdTime.Unix(),
+		CreatedTimeFormatted: createdTimeFormatted,
+	}
+
+	log.Printf("File info retrieved successfully: exists=%t, size=%d, mod_time=%s",
+		result.Exists, result.Size, result.ModTimeFormatted)
+
+	return result
+}
+
+func getFileCreationTime(filePath string) time.Time {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return time.Time{} // возвращаем нулевое время в случае ошибки
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return time.Time{} // возвращаем нулевое время в случае ошибки
+	}
+
+	return fileInfo.ModTime()
+}
+
+func fileInfoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req FilePathRequest
+
+	switch r.Method {
+	case "GET":
+		filePath := r.URL.Query().Get("file_path")
+		if filePath == "" {
+			log.Printf("File info handler: missing file_path parameter in GET request")
+			http.Error(w, `{"error": "file_path parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+		req.FilePath = filePath
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("File info handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		log.Printf("File info handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.FilePath == "" {
+		log.Printf("File info handler: file_path is required")
+		http.Error(w, `{"error": "file_path is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("File info handler processing request for path: %s", req.FilePath)
+	response := getFileInfo(req.FilePath)
+	log.Printf("File info handler response: Success=%t, Exists=%t, Error=%s",
+		response.Success, response.Exists, response.Error)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/player-file", playerFileContentHandler)
@@ -1243,6 +1383,7 @@ func main() {
 	http.HandleFunc("/write-slot", writeSlotHandler)
 	http.HandleFunc("/file-content", fileContentByPathHandler)
 	http.HandleFunc("/write-file", writeFileHandler)
+	http.HandleFunc("/file-info", fileInfoHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Health check requested from %s", r.RemoteAddr)
 		w.Write([]byte(`{"status": "ok"}`))
