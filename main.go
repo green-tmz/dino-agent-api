@@ -105,9 +105,19 @@ type FileInfoResponse struct {
 	Error                string    `json:"error,omitempty"`
 }
 
+type DeleteFileResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	FilePath   string `json:"file_path,omitempty"`
+	Deleted    bool   `json:"deleted"`
+	BackupPath string `json:"backup_path,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 const (
 	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	slotsDir   = `C:\EVRIMA\surv_server\TheIsle\Saved\Slots`
+	backupDir  = `C:\EVRIMA\surv_server\backups`
 )
 
 func writeFileByPath(filePath string, data json.RawMessage) WriteFileResponse {
@@ -1373,6 +1383,387 @@ func fileInfoHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func deleteFileByPath(filePath string, backup bool) DeleteFileResponse {
+	log.Printf("Deleting file by path: %s, backup: %t", filePath, backup)
+
+	// Проверяем, что путь не пустой
+	if filePath == "" {
+		result := DeleteFileResponse{
+			Success: false,
+			Error:   "File path is required",
+		}
+		log.Printf("File path is empty")
+		return result
+	}
+
+	// Проверяем существование файла
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		result := DeleteFileResponse{
+			Success:  true,
+			FilePath: filePath,
+			Deleted:  false,
+			Message:  "File does not exist, nothing to delete",
+		}
+		log.Printf("File not found, nothing to delete: %s", filePath)
+		return result
+	} else if err != nil {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: filePath,
+			Error:    fmt.Sprintf("Error checking file: %v", err),
+		}
+		log.Printf("Error checking file %s: %v", filePath, err)
+		return result
+	}
+
+	var backupPath string
+
+	// Создаем бэкап если требуется
+	if backup {
+		backupPath = createBackup(filePath)
+		if backupPath != "" {
+			log.Printf("Backup created: %s", backupPath)
+		} else {
+			log.Printf("Failed to create backup for: %s", filePath)
+			// Продолжаем удаление даже если бэкап не удался
+		}
+	}
+
+	// Удаляем файл
+	if err := os.Remove(filePath); err != nil {
+		result := DeleteFileResponse{
+			Success:    false,
+			FilePath:   filePath,
+			BackupPath: backupPath,
+			Error:      fmt.Sprintf("Failed to delete file: %v", err),
+		}
+		log.Printf("Failed to delete file %s: %v", filePath, err)
+		return result
+	}
+
+	// Проверяем, что файл действительно удален
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		result := DeleteFileResponse{
+			Success:    true,
+			Message:    fmt.Sprintf("File %s successfully deleted", filepath.Base(filePath)),
+			FilePath:   filePath,
+			Deleted:    true,
+			BackupPath: backupPath,
+		}
+		log.Printf("File successfully deleted: %s", filePath)
+		return result
+	} else {
+		result := DeleteFileResponse{
+			Success:    false,
+			FilePath:   filePath,
+			BackupPath: backupPath,
+			Error:      "File still exists after deletion attempt",
+		}
+		log.Printf("File still exists after deletion: %s", filePath)
+		return result
+	}
+}
+
+func createBackup(filePath string) string {
+	// Создаем имя для бэкап файла
+	fileName := filepath.Base(filePath)
+	backupFileName := fmt.Sprintf("%s_%s.backup",
+		strings.TrimSuffix(fileName, filepath.Ext(fileName)),
+		time.Now().Format("20060102_150405"))
+
+	backupPath := filepath.Join(backupDir, backupFileName)
+
+	// Создаем директорию для бэкапов если не существует
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		log.Printf("Failed to create backup directory %s: %v", backupDir, err)
+		return ""
+	}
+
+	// Копируем файл
+	sourceFile, err := os.Open(filePath)
+	if err != nil {
+		log.Printf("Failed to open source file for backup %s: %v", filePath, err)
+		return ""
+	}
+	defer sourceFile.Close()
+
+	backupFile, err := os.Create(backupPath)
+	if err != nil {
+		log.Printf("Failed to create backup file %s: %v", backupPath, err)
+		return ""
+	}
+	defer backupFile.Close()
+
+	_, err = io.Copy(backupFile, sourceFile)
+	if err != nil {
+		log.Printf("Failed to copy file to backup %s: %v", backupPath, err)
+		return ""
+	}
+
+	log.Printf("Backup created successfully: %s", backupPath)
+	return backupPath
+}
+
+func deletePlayerFile(steamid string) DeleteFileResponse {
+	playerFile := filepath.Join(playersDir, steamid+".json")
+	return deleteFileByPath(playerFile, true) // Всегда делаем бэкап для файлов игроков
+}
+
+func deleteSlotFile(steamid, slotID string) DeleteFileResponse {
+	slotFile := filepath.Join(slotsDir, steamid, slotID+".json")
+	return deleteFileByPath(slotFile, true) // Всегда делаем бэкап для файлов слотов
+}
+
+func deleteEmptyDirectory(dirPath string) DeleteFileResponse {
+	log.Printf("Deleting directory: %s", dirPath)
+
+	// Проверяем, что путь не пустой
+	if dirPath == "" {
+		result := DeleteFileResponse{
+			Success: false,
+			Error:   "Directory path is required",
+		}
+		log.Printf("Directory path is empty")
+		return result
+	}
+
+	// Проверяем существование директории
+	fileInfo, err := os.Stat(dirPath)
+	if os.IsNotExist(err) {
+		result := DeleteFileResponse{
+			Success:  true,
+			FilePath: dirPath,
+			Deleted:  false,
+			Message:  "Directory does not exist, nothing to delete",
+		}
+		log.Printf("Directory not found, nothing to delete: %s", dirPath)
+		return result
+	} else if err != nil {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: dirPath,
+			Error:    fmt.Sprintf("Error checking directory: %v", err),
+		}
+		log.Printf("Error checking directory %s: %v", dirPath, err)
+		return result
+	}
+
+	// Проверяем, что это действительно директория
+	if !fileInfo.IsDir() {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: dirPath,
+			Error:    "Path is not a directory",
+		}
+		log.Printf("Path is not a directory: %s", dirPath)
+		return result
+	}
+
+	// Проверяем, что директория пуста
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: dirPath,
+			Error:    fmt.Sprintf("Failed to open directory: %v", err),
+		}
+		log.Printf("Failed to open directory %s: %v", dirPath, err)
+		return result
+	}
+	defer dir.Close()
+
+	_, err = dir.Readdirnames(1) // Пытаемся прочитать хотя бы один файл
+	if err == nil {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: dirPath,
+			Error:    "Directory is not empty",
+		}
+		log.Printf("Directory is not empty: %s", dirPath)
+		return result
+	}
+
+	// Удаляем пустую директорию
+	if err := os.Remove(dirPath); err != nil {
+		result := DeleteFileResponse{
+			Success:  false,
+			FilePath: dirPath,
+			Error:    fmt.Sprintf("Failed to delete directory: %v", err),
+		}
+		log.Printf("Failed to delete directory %s: %v", dirPath, err)
+		return result
+	}
+
+	result := DeleteFileResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("Directory %s successfully deleted", filepath.Base(dirPath)),
+		FilePath: dirPath,
+		Deleted:  true,
+	}
+	log.Printf("Directory successfully deleted: %s", dirPath)
+	return result
+}
+
+func deleteFileHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req FilePathRequest
+	backup := true // По умолчанию создаем бэкап
+
+	switch r.Method {
+	case "GET":
+		filePath := r.URL.Query().Get("file_path")
+		backupParam := r.URL.Query().Get("backup")
+
+		if filePath == "" {
+			log.Printf("Delete file handler: missing file_path parameter in GET request")
+			http.Error(w, `{"error": "file_path parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		req.FilePath = filePath
+		if backupParam == "false" {
+			backup = false
+		}
+
+	case "POST":
+		var requestBody struct {
+			FilePath string `json:"file_path"`
+			Backup   *bool  `json:"backup,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			log.Printf("Delete file handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+		req.FilePath = requestBody.FilePath
+		if requestBody.Backup != nil {
+			backup = *requestBody.Backup
+		}
+
+	default:
+		log.Printf("Delete file handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.FilePath == "" {
+		log.Printf("Delete file handler: file_path is required")
+		http.Error(w, `{"error": "file_path is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Delete file handler processing request for path: %s, backup: %t", req.FilePath, backup)
+	response := deleteFileByPath(req.FilePath, backup)
+	log.Printf("Delete file handler response: Success=%t, Deleted=%t, Error=%s",
+		response.Success, response.Deleted, response.Error)
+	json.NewEncoder(w).Encode(response)
+}
+
+func deletePlayerFileHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		if steamid == "" {
+			log.Printf("Delete player file handler: missing steamid parameter in GET request")
+			http.Error(w, `{"error": "steamid parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Delete player file handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		log.Printf("Delete player file handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" {
+		log.Printf("Delete player file handler: steamid is required")
+		http.Error(w, `{"error": "steamid is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Delete player file handler processing request for SteamID: %s", req.SteamID)
+	response := deletePlayerFile(req.SteamID)
+	log.Printf("Delete player file handler response: Success=%t, Deleted=%t, Error=%s",
+		response.Success, response.Deleted, response.Error)
+	json.NewEncoder(w).Encode(response)
+}
+
+func deleteSlotFileHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req CheckRequest
+
+	switch r.Method {
+	case "GET":
+		steamid := r.URL.Query().Get("steamid")
+		slotID := r.URL.Query().Get("slot_id")
+		if steamid == "" || slotID == "" {
+			log.Printf("Delete slot file handler: missing parameters in GET request - steamid: %s, slot_id: %s", steamid, slotID)
+			http.Error(w, `{"error": "steamid and slot_id parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		req.SteamID = steamid
+		req.SlotID = slotID
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Delete slot file handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		log.Printf("Delete slot file handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.SteamID == "" || req.SlotID == "" {
+		log.Printf("Delete slot file handler: steamid and slot_id are required")
+		http.Error(w, `{"error": "steamid and slot_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Delete slot file handler processing request for SteamID: %s, SlotID: %s", req.SteamID, req.SlotID)
+	response := deleteSlotFile(req.SteamID, req.SlotID)
+	log.Printf("Delete slot file handler response: Success=%t, Deleted=%t, Error=%s",
+		response.Success, response.Deleted, response.Error)
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/player-file", playerFileContentHandler)
@@ -1384,6 +1775,9 @@ func main() {
 	http.HandleFunc("/file-content", fileContentByPathHandler)
 	http.HandleFunc("/write-file", writeFileHandler)
 	http.HandleFunc("/file-info", fileInfoHandler)
+	http.HandleFunc("/delete-file", deleteFileHandler)
+	http.HandleFunc("/delete-player-file", deletePlayerFileHandler)
+	http.HandleFunc("/delete-slot-file", deleteSlotFileHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Health check requested from %s", r.RemoteAddr)
 		w.Write([]byte(`{"status": "ok"}`))
