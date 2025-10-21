@@ -77,12 +77,109 @@ type FileContentByPathResponse struct {
 	Size    int64  `json:"size,omitempty"`
 }
 
+type WriteFileRequest struct {
+	FilePath string          `json:"file_path"`
+	Data     json.RawMessage `json:"data"`
+}
+
+type WriteFileResponse struct {
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+	FilePath string `json:"file_path,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 const (
 	playersDir = `C:\EVRIMA\surv_server\TheIsle\Saved\Databases\Survival\Players`
 	slotsDir   = `C:\EVRIMA\surv_server\TheIsle\Saved\Slots`
 )
 
-// getFileContentByPath возвращает содержимое файла по указанному пути
+func writeFileByPath(filePath string, data json.RawMessage) WriteFileResponse {
+	log.Printf("Writing file by path: %s", filePath)
+
+	// Проверяем, что путь не пустой
+	if filePath == "" {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   "File path is required",
+		}
+		log.Printf("File path is empty")
+		return result
+	}
+
+	// Проверяем, что данные не пустые
+	if len(data) == 0 {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   "Data is required",
+		}
+		log.Printf("Data is empty")
+		return result
+	}
+
+	// Валидируем JSON данные
+	var jsonData interface{}
+	if err := json.Unmarshal(data, &jsonData); err != nil {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid JSON data: %v", err),
+		}
+		log.Printf("Invalid JSON data: %v", err)
+		return result
+	}
+
+	// Форматируем JSON с отступами для читаемости
+	formattedData, err := json.MarshalIndent(jsonData, "", "  ")
+	if err != nil {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to format JSON: %v", err),
+		}
+		log.Printf("Failed to format JSON: %v", err)
+		return result
+	}
+
+	// Создаем директорию если не существует
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create directory: %v", err),
+		}
+		log.Printf("Failed to create directory %s: %v", dir, err)
+		return result
+	}
+
+	// Записываем файл
+	if err := os.WriteFile(filePath, formattedData, 0644); err != nil {
+		result := WriteFileResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to write file: %v", err),
+		}
+		log.Printf("Failed to write file %s: %v", filePath, err)
+		return result
+	}
+
+	// Получаем информацию о файле для логирования
+	fileInfo, err := os.Stat(filePath)
+	var fileSize int64
+	if err == nil {
+		fileSize = fileInfo.Size()
+	}
+
+	log.Printf("Successfully wrote file: %s, size: %d bytes", filePath, fileSize)
+
+	result := WriteFileResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("File %s successfully written", filepath.Base(filePath)),
+		FilePath: filePath,
+		Size:     fileSize,
+	}
+	log.Printf("File write completed successfully")
+	return result
+}
+
 func getFileContentByPath(filePath string) FileContentByPathResponse {
 	log.Printf("Getting file content by path: %s", filePath)
 
@@ -428,7 +525,6 @@ func transferPlayerSlot(steamid, oldSlotID string) TransferResponse {
 	return result
 }
 
-// createEmptySlot создает пустой слот при смерти динозавра
 func createEmptySlot(steamid, oldSlotID string) EmptySlotResponse {
 	log.Printf("Creating empty slot for SteamID: %s, SlotID: %s", steamid, oldSlotID)
 	remoteDir := filepath.Join(`C:\EVRIMA\surv_server\TheIsle\Saved\Slots`, steamid)
@@ -482,7 +578,6 @@ func createEmptySlot(steamid, oldSlotID string) EmptySlotResponse {
 	return result
 }
 
-// restoreSlotFromFile восстанавливает слот из файла слотов в файл игрока
 func restoreSlotFromFile(steamid, slotID string) RestoreSlotResponse {
 	log.Printf("Restoring slot from file for SteamID: %s, SlotID: %s", steamid, slotID)
 	remoteDir := filepath.Join(slotsDir, steamid)
@@ -609,7 +704,6 @@ func restoreSlotFromFile(steamid, slotID string) RestoreSlotResponse {
 	return result
 }
 
-// writeSlotFile записывает данные в файл слота
 func writeSlotFile(steamid, fileName string, data json.RawMessage) WriteSlotResponse {
 	log.Printf("Writing slot file for SteamID: %s, FileName: %s", steamid, fileName)
 
@@ -697,7 +791,64 @@ func writeSlotFile(steamid, fileName string, data json.RawMessage) WriteSlotResp
 	return result
 }
 
-// Обработчик для получения содержимого файла по пути
+func writeFileHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req WriteFileRequest
+
+	switch r.Method {
+	case "GET":
+		filePath := r.URL.Query().Get("file_path")
+		dataStr := r.URL.Query().Get("data")
+
+		if filePath == "" {
+			log.Printf("Write file handler: missing file_path parameter in GET request")
+			http.Error(w, `{"error": "file_path parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		req.FilePath = filePath
+		if dataStr != "" {
+			req.Data = json.RawMessage(dataStr)
+		}
+
+	case "POST":
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Write file handler: invalid JSON in POST request: %v", err)
+			http.Error(w, `{"error": "Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+	default:
+		log.Printf("Write file handler: method not allowed: %s", r.Method)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if req.FilePath == "" {
+		log.Printf("Write file handler: file_path is required")
+		http.Error(w, `{"error": "file_path is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Data) == 0 {
+		log.Printf("Write file handler: data is required")
+		http.Error(w, `{"error": "data is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Write file handler processing request for path: %s", req.FilePath)
+	response := writeFileByPath(req.FilePath, req.Data)
+	log.Printf("Write file handler response: Success=%t, Error=%s, Size=%d", response.Success, response.Error, response.Size)
+	json.NewEncoder(w).Encode(response)
+}
+
 func fileContentByPathHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1090,7 +1241,8 @@ func main() {
 	http.HandleFunc("/empty-slot", emptySlotHandler)
 	http.HandleFunc("/restore-slot", restoreSlotHandler)
 	http.HandleFunc("/write-slot", writeSlotHandler)
-	http.HandleFunc("/file-content", fileContentByPathHandler) // Новый обработчик
+	http.HandleFunc("/file-content", fileContentByPathHandler)
+	http.HandleFunc("/write-file", writeFileHandler)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Health check requested from %s", r.RemoteAddr)
 		w.Write([]byte(`{"status": "ok"}`))
